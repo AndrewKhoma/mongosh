@@ -3361,6 +3361,17 @@ describe('Database', function () {
         expect(result).to.include('ECONNREFUSED');
       });
 
+      it('scrubs API key from fetch exception messages', async function () {
+        fetchStub.rejects(
+          new Error(
+            'request to https://example.com failed, key test-api-key-12345 rejected'
+          )
+        );
+        const result = (await database.crackJokes('test')) as string;
+        expect(result).to.not.include('test-api-key-12345');
+        expect(result).to.include('[REDACTED]');
+      });
+
       it('works on empty database', async function () {
         serviceProvider.listCollections.resolves([]);
         const result = await database.crackJokes('surprise me');

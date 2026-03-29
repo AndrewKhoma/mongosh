@@ -2058,10 +2058,14 @@ export class Database<
 
       responseData = (await response.json()) as Document;
     } catch (err: any) {
-      const message =
+      let message =
         err?.name === 'AbortError' || err?.code === 'ETIMEDOUT'
           ? 'Request timed out.'
           : err?.message ?? 'Unknown network error';
+      message = message.replace(
+        new RegExp(apiKey!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
+        '[REDACTED]'
+      );
       return `Failed to call Azure OpenAI: ${message}. Check your endpoint URL and network connection.`;
     }
 
