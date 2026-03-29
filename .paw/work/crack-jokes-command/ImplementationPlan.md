@@ -41,12 +41,12 @@ Add a `db.crackJokes(description, show_metadata)` method to the Database shell A
 
 ### Changes Required:
 
-- **`packages/shell-api/src/error-codes.ts`**: Add `AzureOpenAIConfigMissing: 'SHAPI-10006'` to the `ShellApiErrors` enum for telemetry on missing configuration
+- **`packages/shell-api/src/error-codes.ts`**: Add `AzureOpenAIConfigMissing: 'SHAPI-10006'` to the `ShellApiErrors` enum. This code is emitted via the event bus for telemetry when env vars are missing (alongside the returned user-facing string), not thrown as an exception
 - **`packages/shell-api/src/database.ts`**:
   - Add a `fetch` type declaration (minimal ambient declaration since `lib: ["es2021"]` lacks fetch types) — either inline or in a new `packages/shell-api/src/fetch-types.d.ts`
   - Add `crackJokes(description?: string, showMetadata?: boolean): Promise<string | Document>` method following the decorator pattern from existing methods:
     - Decorators: `@returnsPromise`, `@apiVersions([])`
-    - Call `_emitDatabaseApiCall('crackJokes', ...)` — exclude description content from telemetry to avoid logging user prompts
+    - Call `_emitDatabaseApiCall('crackJokes', { showMetadata })` — emit only the `showMetadata` flag for telemetry; exclude user description to avoid logging user prompts
     - **Config validation**: Read `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_MODEL` from `process.env`. Return plain-language setup message if any are missing (Pattern A from CodeResearch RQ-4)
     - **Metadata collection**: Use `_getCollectionNames()` (capped to 20), then for each collection: `estimatedDocumentCount()` via service provider, sample up to 5 docs via `find().limit(5).toArray()`, extract field names from samples. Truncate field values >1000 chars, omit Binary fields. Truncate user description to 500 chars
     - **Prompt construction**: Build Azure OpenAI Responses API request body with `developer` role (standup comedian persona constrained to dad jokes) and `user` role (metadata + description). Single-turn, no `previous_response_id`
