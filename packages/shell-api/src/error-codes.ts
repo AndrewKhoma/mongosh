@@ -50,4 +50,12 @@ export const ShellApiErrors = {
    * **Solution: Create a new Mongo object with the correct field-level encryption options first.**
    */
   NotUsingFLE: 'SHAPI-10005',
+
+  /**
+   * Signals that required Azure OpenAI configuration environment variables are missing.
+   * Emitted for telemetry alongside a user-facing setup message.
+   *
+   * **Solution: Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, and AZURE_OPENAI_DEPLOYMENT environment variables.**
+   */
+  AzureOpenAIConfigMissing: 'SHAPI-10006',
 } as const;

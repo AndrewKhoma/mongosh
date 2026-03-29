@@ -64,6 +64,22 @@ import type {
 } from '@mongosh/service-provider-core';
 import type { MQLPipeline } from './mql-types';
 import type { Abortable } from 'events';
+import { Binary } from 'bson';
+
+function sanitizeDocForPrompt(doc: Document): Document {
+  const result: Document = {};
+  for (const [key, value] of Object.entries(doc)) {
+    if (value instanceof Binary) continue;
+    if (typeof value === 'string' && value.length > 1000) {
+      result[key] = value.slice(0, 1000) + '...[truncated]';
+    } else if (Buffer.isBuffer(value)) {
+      continue;
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
 
 export type CollectionNamesWithTypes = {
   name: string;
@@ -1867,5 +1883,197 @@ export class Database<
       checkMetadataConsistency: 1,
       ...options,
     });
+  }
+
+  @returnsPromise
+  @apiVersions([])
+  async crackJokes(
+    description?: string,
+    showMetadata?: boolean
+  ): Promise<string | Document> {
+    this._emitDatabaseApiCall('crackJokes', {
+      showMetadata: showMetadata ?? false,
+    });
+
+    // --- Config validation ---
+    const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
+    const apiKey = process.env.AZURE_OPENAI_API_KEY;
+    const deployment = process.env.AZURE_OPENAI_DEPLOYMENT;
+
+    const missing: string[] = [];
+    if (!endpoint)
+      missing.push(
+        'AZURE_OPENAI_ENDPOINT (e.g. export AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com)'
+      );
+    if (!apiKey)
+      missing.push(
+        'AZURE_OPENAI_API_KEY (e.g. export AZURE_OPENAI_API_KEY=your-api-key)'
+      );
+    if (!deployment)
+      missing.push(
+        'AZURE_OPENAI_DEPLOYMENT (e.g. export AZURE_OPENAI_DEPLOYMENT=your-deployment-name)'
+      );
+
+    if (missing.length > 0) {
+      return (
+        'Azure OpenAI is not configured. Please set the following environment variable(s):\n' +
+        missing.map((m) => `  - ${m}`).join('\n')
+      );
+    }
+
+    // --- Metadata collection ---
+    const desc = (description ?? '').slice(0, 500);
+    const allNames = await this._getCollectionNames();
+    const collectionNames = allNames.slice(0, 20);
+
+    const collectionsMetadata: Document[] = [];
+    for (const name of collectionNames) {
+      try {
+        const count = await this._mongo._serviceProvider.estimatedDocumentCount(
+          this._name,
+          name
+        );
+
+        const cursor = this._mongo._serviceProvider.find(
+          this._name,
+          name,
+          {},
+          { limit: 5 }
+        );
+        const samples = await cursor.toArray();
+
+        const sanitizedSamples = samples.map((doc: Document) =>
+          sanitizeDocForPrompt(doc)
+        );
+
+        const fields =
+          samples.length > 0
+            ? [...new Set(samples.flatMap((d: Document) => Object.keys(d)))]
+            : [];
+
+        collectionsMetadata.push({
+          name,
+          documentCount: count,
+          fields,
+          sampleDocuments: sanitizedSamples,
+        });
+      } catch {
+        collectionsMetadata.push({ name, error: 'Could not inspect' });
+      }
+    }
+
+    // --- Prompt construction ---
+    const metadataText =
+      collectionNames.length === 0
+        ? 'This database is empty — it has no collections.'
+        : collectionsMetadata
+            .map((c) => {
+              if (c.error) return `Collection "${c.name}": ${c.error}`;
+              return (
+                `Collection "${c.name}" (${
+                  c.documentCount
+                } documents, fields: [${(c.fields as string[]).join(
+                  ', '
+                )}]):\n` +
+                `Sample documents: ${JSON.stringify(
+                  c.sampleDocuments,
+                  null,
+                  2
+                )}`
+              );
+            })
+            .join('\n\n');
+
+    const userMessage = desc
+      ? `The user wants a joke about: "${desc}"\n\nHere is the database metadata:\n${metadataText}`
+      : `Here is the database metadata:\n${metadataText}`;
+
+    const requestBody = {
+      input: [
+        {
+          role: 'developer',
+          content:
+            'You are a pro standup comedian. Your job is to tell exactly one short dad joke based on the database metadata the user provides. The joke must reference specific details from their data (collection names, field names, document values). Keep it family-friendly, punny, and under 280 characters. Respond with ONLY the joke text, nothing else.',
+        },
+        {
+          role: 'user',
+          content: userMessage,
+        },
+      ],
+    };
+
+    // --- HTTP call ---
+    const url = `${endpoint!.replace(
+      /\/+$/,
+      ''
+    )}/openai/deployments/${deployment}/responses?api-version=2025-03-01-preview`;
+
+    let responseData: Document;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': apiKey!,
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        return `Azure OpenAI request failed (HTTP ${
+          response.status
+        }): ${errorText.slice(
+          0,
+          200
+        )}. Check your endpoint and deployment configuration.`;
+      }
+
+      responseData = (await response.json()) as Document;
+    } catch (err: any) {
+      const message =
+        err?.name === 'AbortError' || err?.code === 'ETIMEDOUT'
+          ? 'Request timed out.'
+          : err?.message ?? 'Unknown network error';
+      return `Failed to call Azure OpenAI: ${message}. Check your endpoint URL and network connection.`;
+    }
+
+    // --- Parse response ---
+    let jokeText: string | undefined;
+    try {
+      const output = responseData?.output;
+      if (Array.isArray(output)) {
+        for (const item of output) {
+          if (item.type === 'message' && Array.isArray(item.content)) {
+            for (const content of item.content) {
+              if (content.type === 'output_text' && content.text) {
+                jokeText = content.text;
+                break;
+              }
+            }
+          }
+          if (jokeText) break;
+        }
+      }
+    } catch {
+      // fall through to error below
+    }
+
+    if (!jokeText) {
+      return 'Azure OpenAI returned an unexpected response. The joke could not be extracted. Try again or check your deployment configuration.';
+    }
+
+    // --- Return value ---
+    if (showMetadata) {
+      return {
+        joke: jokeText,
+        metadata: {
+          collectionsUsed: collectionNames,
+          deployment: deployment!,
+        },
+      };
+    }
+
+    return jokeText;
   }
 }
