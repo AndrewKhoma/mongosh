@@ -3497,6 +3497,82 @@ describe('Database', function () {
         const body = JSON.parse(fetchStub.firstCall.args[1].body);
         expect(body.model).to.equal('test-deployment');
       });
+
+      it('handles circular references without crashing', async function () {
+        const circularDoc: any = { _id: 1, name: 'test' };
+        circularDoc.self = circularDoc;
+        const cursorWithCircular = {
+          toArray: sinon.stub().resolves([circularDoc]),
+        };
+        serviceProvider.find.returns(cursorWithCircular as any);
+
+        const result = await database.crackJokes('test');
+        expect(result).to.be.a('string');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content).to.include('circular reference');
+      });
+
+      it('handles deeply nested documents without crashing', async function () {
+        let deep: any = { value: 'leaf' };
+        for (let i = 0; i < 100; i++) {
+          deep = { nested: deep };
+        }
+        const cursorWithDeep = {
+          toArray: sinon.stub().resolves([{ _id: 1, data: deep }]),
+        };
+        serviceProvider.find.returns(cursorWithDeep as any);
+
+        const result = await database.crackJokes('test');
+        expect(result).to.be.a('string');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content).to.include('nested too deeply');
+      });
+
+      it('preserves Date and RegExp objects as strings in prompt', async function () {
+        const cursorWithSpecialTypes = {
+          toArray: sinon.stub().resolves([
+            {
+              _id: 1,
+              createdAt: new Date('2024-01-15T00:00:00Z'),
+              pattern: /test/i,
+            },
+          ]),
+        };
+        serviceProvider.find.returns(cursorWithSpecialTypes as any);
+
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        const userContent = body.input[1].content;
+        expect(userContent).to.include('2024-01-15');
+        expect(userContent).to.include('/test/i');
+      });
+
+      it('truncates prompt when metadata is very large', async function () {
+        const hugeDocs = Array.from({ length: 5 }, (_, i) => ({
+          _id: i,
+          data: 'x'.repeat(999),
+        }));
+        const cursorWithHuge = {
+          toArray: sinon.stub().resolves(hugeDocs),
+        };
+        serviceProvider.find.returns(cursorWithHuge as any);
+
+        const manyCollections = Array.from({ length: 20 }, (_, i) => ({
+          name: `coll${i}`,
+          type: 'collection',
+        }));
+        serviceProvider.listCollections.resolves(manyCollections);
+
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content.length).to.be.lessThan(60000);
+      });
+
+      it('sets timeout on fetch request', async function () {
+        await database.crackJokes('test');
+        const fetchOptions = fetchStub.firstCall.args[1];
+        expect(fetchOptions.signal).to.exist;
+      });
     });
   });
 });
