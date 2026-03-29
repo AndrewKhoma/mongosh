@@ -28,9 +28,9 @@ Add a `db.crackJokes(description, show_metadata)` method to the Database shell A
 - Proxy support for the HTTP call (can be added later via `@mongodb-js/devtools-proxy-support`)
 
 ## Phase Status
-- [ ] **Phase 1: Core Implementation** - Add `crackJokes` method with metadata collection, prompt construction, Azure OpenAI call, and error handling
-- [ ] **Phase 2: Tests** - Unit tests covering happy path, both return modes, missing config, API failures, empty databases, and edge cases
-- [ ] **Phase 3: Documentation** - Docs.md technical reference
+- [x] **Phase 1: Core Implementation** - Add `crackJokes` method with metadata collection, prompt construction, Azure OpenAI call, and error handling
+- [x] **Phase 2: Tests** - Unit tests covering happy path, both return modes, missing config, API failures, empty databases, and edge cases
+- [x] **Phase 3: Documentation** - Docs.md technical reference
 
 ## Phase Candidates
 <!-- None for now -->
