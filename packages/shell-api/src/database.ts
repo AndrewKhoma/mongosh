@@ -69,11 +69,25 @@ import { Binary } from 'bson';
 function sanitizeDocForPrompt(doc: Document): Document {
   const result: Document = {};
   for (const [key, value] of Object.entries(doc)) {
-    if (value instanceof Binary) continue;
+    if (value instanceof Binary || Buffer.isBuffer(value)) continue;
     if (typeof value === 'string' && value.length > 1000) {
       result[key] = value.slice(0, 1000) + '...[truncated]';
-    } else if (Buffer.isBuffer(value)) {
-      continue;
+    } else if (
+      value !== null &&
+      typeof value === 'object' &&
+      !Array.isArray(value)
+    ) {
+      result[key] = sanitizeDocForPrompt(value as Document);
+    } else if (Array.isArray(value)) {
+      result[key] = value
+        .filter((v) => !(v instanceof Binary) && !Buffer.isBuffer(v))
+        .map((v) =>
+          v !== null && typeof v === 'object' && !Array.isArray(v)
+            ? sanitizeDocForPrompt(v as Document)
+            : typeof v === 'string' && v.length > 1000
+            ? v.slice(0, 1000) + '...[truncated]'
+            : v
+        );
     } else {
       result[key] = value;
     }
@@ -1915,6 +1929,15 @@ export class Database<
       );
 
     if (missing.length > 0) {
+      const configError = new MongoshRuntimeError(
+        `Missing Azure OpenAI configuration: ${missing.length} variable(s)`,
+        ShellApiErrors.AzureOpenAIConfigMissing
+      );
+      this._mongo._instanceState.messageBus.emit(
+        'mongosh:error',
+        configError,
+        'shell-api'
+      );
       return (
         'Azure OpenAI is not configured. Please set the following environment variable(s):\n' +
         missing.map((m) => `  - ${m}`).join('\n')
@@ -2020,7 +2043,11 @@ export class Database<
       });
 
       if (!response.ok) {
-        const errorText = await response.text().catch(() => 'Unknown error');
+        let errorText = await response.text().catch(() => 'Unknown error');
+        errorText = errorText.replace(
+          new RegExp(apiKey!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
+          '[REDACTED]'
+        );
         return `Azure OpenAI request failed (HTTP ${
           response.status
         }): ${errorText.slice(
