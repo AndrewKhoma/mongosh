@@ -3195,5 +3195,290 @@ describe('Database', function () {
         ).to.equal(internalSession);
       }
     });
+
+    describe('crackJokes', function () {
+      const VALID_RESPONSE = {
+        output: [
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: 'Why did the MongoDB collection break up with SQL? Because it found the relationship too structured!',
+              },
+            ],
+          },
+        ],
+      };
+
+      let fetchStub: sinon.SinonStub;
+      let savedEnv: Record<string, string | undefined>;
+
+      beforeEach(function () {
+        savedEnv = {
+          AZURE_OPENAI_ENDPOINT: process.env.AZURE_OPENAI_ENDPOINT,
+          AZURE_OPENAI_API_KEY: process.env.AZURE_OPENAI_API_KEY,
+          AZURE_OPENAI_DEPLOYMENT: process.env.AZURE_OPENAI_DEPLOYMENT,
+        };
+        process.env.AZURE_OPENAI_ENDPOINT =
+          'https://test-resource.openai.azure.com';
+        process.env.AZURE_OPENAI_API_KEY = 'test-api-key-12345';
+        process.env.AZURE_OPENAI_DEPLOYMENT = 'test-deployment';
+
+        serviceProvider.listCollections.resolves([
+          { name: 'users', type: 'collection' },
+          { name: 'orders', type: 'collection' },
+        ]);
+        serviceProvider.estimatedDocumentCount.resolves(42);
+        const fakeCursor = {
+          toArray: sinon.stub().resolves([
+            { _id: 1, name: 'Alice', age: 30 },
+            { _id: 2, name: 'Bob', age: 25 },
+          ]),
+        };
+        serviceProvider.find.returns(fakeCursor as any);
+
+        fetchStub = sinon.stub(globalThis, 'fetch');
+        fetchStub.resolves(
+          new Response(JSON.stringify(VALID_RESPONSE), { status: 200 })
+        );
+      });
+
+      afterEach(function () {
+        fetchStub.restore();
+        for (const [key, val] of Object.entries(savedEnv)) {
+          if (val === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = val;
+          }
+        }
+      });
+
+      it('returns a joke string by default', async function () {
+        const result = await database.crackJokes('tell me a joke');
+        expect(result).to.be.a('string');
+        expect(result).to.include('MongoDB');
+      });
+
+      it('returns structured document when showMetadata is true', async function () {
+        const result = (await database.crackJokes(
+          'tell me a joke',
+          true
+        )) as Document;
+        expect(result).to.have.property('joke');
+        expect(result.joke).to.be.a('string');
+        expect(result).to.have.nested.property('metadata.collectionsUsed');
+        expect(result.metadata.collectionsUsed).to.deep.equal([
+          'users',
+          'orders',
+        ]);
+        expect(result.metadata.deployment).to.equal('test-deployment');
+      });
+
+      it('returns setup message when AZURE_OPENAI_ENDPOINT is missing', async function () {
+        delete process.env.AZURE_OPENAI_ENDPOINT;
+        const result = await database.crackJokes('test');
+        expect(result).to.be.a('string');
+        expect(result as string).to.include('AZURE_OPENAI_ENDPOINT');
+        expect(result as string).to.include('not configured');
+      });
+
+      it('returns setup message when AZURE_OPENAI_API_KEY is missing', async function () {
+        delete process.env.AZURE_OPENAI_API_KEY;
+        const result = await database.crackJokes('test');
+        expect(result).to.be.a('string');
+        expect(result as string).to.include('AZURE_OPENAI_API_KEY');
+      });
+
+      it('returns setup message when AZURE_OPENAI_DEPLOYMENT is missing', async function () {
+        delete process.env.AZURE_OPENAI_DEPLOYMENT;
+        const result = await database.crackJokes('test');
+        expect(result).to.be.a('string');
+        expect(result as string).to.include('AZURE_OPENAI_DEPLOYMENT');
+      });
+
+      it('returns consolidated message when all env vars are missing', async function () {
+        delete process.env.AZURE_OPENAI_ENDPOINT;
+        delete process.env.AZURE_OPENAI_API_KEY;
+        delete process.env.AZURE_OPENAI_DEPLOYMENT;
+        const result = (await database.crackJokes('test')) as string;
+        expect(result).to.include('AZURE_OPENAI_ENDPOINT');
+        expect(result).to.include('AZURE_OPENAI_API_KEY');
+        expect(result).to.include('AZURE_OPENAI_DEPLOYMENT');
+      });
+
+      it('returns actionable error when API returns non-OK status', async function () {
+        fetchStub.resolves(
+          new Response('Unauthorized', {
+            status: 401,
+            statusText: 'Unauthorized',
+          })
+        );
+        const result = (await database.crackJokes('test')) as string;
+        expect(result).to.include('Azure OpenAI request failed');
+        expect(result).to.include('401');
+        expect(result).to.not.include('test-api-key-12345');
+      });
+
+      it('scrubs API key from error response body', async function () {
+        fetchStub.resolves(
+          new Response('Error: invalid key test-api-key-12345 was rejected', {
+            status: 403,
+          })
+        );
+        const result = (await database.crackJokes('test')) as string;
+        expect(result).to.not.include('test-api-key-12345');
+        expect(result).to.include('[REDACTED]');
+      });
+
+      it('returns actionable error on malformed response', async function () {
+        fetchStub.resolves(
+          new Response(JSON.stringify({ unexpected: 'data' }), { status: 200 })
+        );
+        const result = (await database.crackJokes('test')) as string;
+        expect(result).to.include('unexpected response');
+      });
+
+      it('returns actionable error with empty response body', async function () {
+        fetchStub.resolves(new Response(JSON.stringify({}), { status: 200 }));
+        const result = (await database.crackJokes('test')) as string;
+        expect(result).to.include('unexpected response');
+      });
+
+      it('returns timeout-specific error on network timeout', async function () {
+        const timeoutError = new Error('network timeout');
+        timeoutError.name = 'AbortError';
+        fetchStub.rejects(timeoutError);
+        const result = (await database.crackJokes('test')) as string;
+        expect(result).to.include('timed out');
+      });
+
+      it('returns error on generic network failure', async function () {
+        fetchStub.rejects(new Error('ECONNREFUSED'));
+        const result = (await database.crackJokes('test')) as string;
+        expect(result).to.include('Failed to call Azure OpenAI');
+        expect(result).to.include('ECONNREFUSED');
+      });
+
+      it('works on empty database', async function () {
+        serviceProvider.listCollections.resolves([]);
+        const result = await database.crackJokes('surprise me');
+        expect(result).to.be.a('string');
+        expect(fetchStub).to.have.been.calledOnce;
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content).to.include('empty');
+      });
+
+      it('works on database with empty collections', async function () {
+        serviceProvider.estimatedDocumentCount.resolves(0);
+        const emptyCursor = { toArray: sinon.stub().resolves([]) };
+        serviceProvider.find.returns(emptyCursor as any);
+        const result = await database.crackJokes('tell me');
+        expect(result).to.be.a('string');
+        expect(fetchStub).to.have.been.calledOnce;
+      });
+
+      it('caps metadata collection at 20 collections', async function () {
+        const manyCollections = Array.from({ length: 25 }, (_, i) => ({
+          name: `coll${i}`,
+          type: 'collection',
+        }));
+        serviceProvider.listCollections.resolves(manyCollections);
+
+        const result = (await database.crackJokes('test', true)) as Document;
+        expect(result.metadata.collectionsUsed).to.have.length(20);
+        expect(result.metadata.collectionsUsed).to.not.include('coll20');
+      });
+
+      it('truncates fields longer than 1000 characters in prompt', async function () {
+        const longString = 'x'.repeat(1500);
+        const cursorWithLongField = {
+          toArray: sinon.stub().resolves([{ _id: 1, longField: longString }]),
+        };
+        serviceProvider.find.returns(cursorWithLongField as any);
+
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        const userContent = body.input[1].content;
+        expect(userContent).to.not.include(longString);
+        expect(userContent).to.include('...[truncated]');
+      });
+
+      it('omits Binary fields from sample documents in prompt', async function () {
+        const cursorWithBinary = {
+          toArray: sinon.stub().resolves([
+            {
+              _id: 1,
+              name: 'test',
+              binData: new bson.Binary(Buffer.from('hello')),
+            },
+          ]),
+        };
+        serviceProvider.find.returns(cursorWithBinary as any);
+
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        const userContent = body.input[1].content;
+        // The sanitized sample documents should not contain the binary value
+        expect(userContent).to.include('"name"');
+        expect(userContent).to.not.include('aGVsbG8=');
+      });
+
+      it('handles empty string description', async function () {
+        const result = await database.crackJokes('');
+        expect(result).to.be.a('string');
+        expect(fetchStub).to.have.been.calledOnce;
+      });
+
+      it('handles missing description', async function () {
+        const result = await database.crackJokes();
+        expect(result).to.be.a('string');
+        expect(fetchStub).to.have.been.calledOnce;
+      });
+
+      it('truncates description longer than 500 characters', async function () {
+        const longDesc = 'a'.repeat(600);
+        await database.crackJokes(longDesc);
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        const userContent = body.input[1].content;
+        expect(userContent).to.not.include(longDesc);
+        expect(userContent).to.include('a'.repeat(500));
+      });
+
+      it('sends stateless single-turn requests', async function () {
+        await database.crackJokes('first joke');
+        await database.crackJokes('second joke');
+
+        expect(fetchStub).to.have.been.calledTwice;
+        const body1 = JSON.parse(fetchStub.firstCall.args[1].body);
+        const body2 = JSON.parse(fetchStub.secondCall.args[1].body);
+        expect(body1).to.not.have.property('previous_response_id');
+        expect(body2).to.not.have.property('previous_response_id');
+      });
+
+      it('uses developer role for comedian persona', async function () {
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[0].role).to.equal('developer');
+        expect(body.input[0].content).to.include('standup comedian');
+        expect(body.input[1].role).to.equal('user');
+      });
+
+      it('sends api-key header in request', async function () {
+        await database.crackJokes('test');
+        const headers = fetchStub.firstCall.args[1].headers;
+        expect(headers['api-key']).to.equal('test-api-key-12345');
+      });
+
+      it('calls correct Azure OpenAI URL', async function () {
+        await database.crackJokes('test');
+        const url = fetchStub.firstCall.args[0];
+        expect(url).to.include(
+          'https://test-resource.openai.azure.com/openai/deployments/test-deployment/responses'
+        );
+        expect(url).to.include('api-version=');
+      });
+    });
   });
 });

@@ -1687,6 +1687,11 @@ const translations: Catalog = {
                 'Returns a cursor with information about metadata inconsistencies',
               example: 'db.checkMetadataConsistency(<options>)',
             },
+            crackJokes: {
+              description:
+                'Generates a dad joke about your database data using Azure OpenAI',
+              example: "db.crackJokes('tell me about my data', true)",
+            },
           },
         },
       },
