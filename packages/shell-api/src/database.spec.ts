@@ -3486,9 +3486,16 @@ describe('Database', function () {
         await database.crackJokes('test');
         const url = fetchStub.firstCall.args[0];
         expect(url).to.include(
-          'https://test-resource.openai.azure.com/openai/deployments/test-deployment/responses'
+          'https://test-resource.openai.azure.com/openai/responses'
         );
         expect(url).to.include('api-version=');
+        expect(url).to.not.include('deployments');
+      });
+
+      it('includes model in request body', async function () {
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.model).to.equal('test-deployment');
       });
     });
   });

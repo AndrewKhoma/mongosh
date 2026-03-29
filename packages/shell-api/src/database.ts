@@ -2012,6 +2012,7 @@ export class Database<
       : `Here is the database metadata:\n${metadataText}`;
 
     const requestBody = {
+      model: deployment,
       input: [
         {
           role: 'developer',
@@ -2029,7 +2030,7 @@ export class Database<
     const url = `${endpoint!.replace(
       /\/+$/,
       ''
-    )}/openai/deployments/${deployment}/responses?api-version=2025-03-01-preview`;
+    )}/openai/responses?api-version=2025-03-01-preview`;
 
     let responseData: Document;
     try {
