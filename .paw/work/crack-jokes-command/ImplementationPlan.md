@@ -43,15 +43,15 @@ Add a `db.crackJokes(description, show_metadata)` method to the Database shell A
 
 - **`packages/shell-api/src/error-codes.ts`**: Add `AzureOpenAIConfigMissing: 'SHAPI-10006'` to the `ShellApiErrors` enum. This code is emitted via the event bus for telemetry when env vars are missing (alongside the returned user-facing string), not thrown as an exception
 - **`packages/shell-api/src/database.ts`**:
-  - Add a `fetch` type declaration (minimal ambient declaration since `lib: ["es2021"]` lacks fetch types) — either inline or in a new `packages/shell-api/src/fetch-types.d.ts`
+  - Add a `fetch` type declaration in a new `packages/shell-api/src/fetch-types.d.ts` file (minimal ambient declarations for `fetch`, `Request`, `Response`, `Headers` since `lib: ["es2021"]` lacks them). This file covers both production code in `database.ts` and test code in `database.spec.ts`
   - Add `crackJokes(description?: string, showMetadata?: boolean): Promise<string | Document>` method following the decorator pattern from existing methods:
     - Decorators: `@returnsPromise`, `@apiVersions([])`
     - Call `_emitDatabaseApiCall('crackJokes', { showMetadata })` — emit only the `showMetadata` flag for telemetry; exclude user description to avoid logging user prompts
-    - **Config validation**: Read `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_MODEL` from `process.env`. Return plain-language setup message if any are missing (Pattern A from CodeResearch RQ-4)
+    - **Config validation**: Read `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT` from `process.env`. If any are missing, return a single consolidated message listing all missing variable names with setup examples (e.g., `export AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com`). Follow Pattern A from CodeResearch RQ-4
     - **Metadata collection**: Use `_getCollectionNames()` (capped to 20), then for each collection: `estimatedDocumentCount()` via service provider, sample up to 5 docs via `find().limit(5).toArray()`, extract field names from samples. Truncate field values >1000 chars, omit Binary fields. Truncate user description to 500 chars
     - **Prompt construction**: Build Azure OpenAI Responses API request body with `developer` role (standup comedian persona constrained to dad jokes) and `user` role (metadata + description). Single-turn, no `previous_response_id`
     - **HTTP call**: `POST` to `${endpoint}/openai/deployments/${model}/responses?api-version=2025-03-01-preview` with `api-key` header. Parse response to extract joke text from `output[].content[].text`
-    - **Return value**: If `showMetadata` is false/omitted, return joke string. If true, return `{ joke, metadata: { collectionsUsed, model } }`
+    - **Return value**: If `showMetadata` is false/omitted, return joke string. If true, return `{ joke, metadata: { collectionsUsed, deployment } }`
     - **Error handling**: Catch fetch errors and non-OK responses, return actionable messages. Never include API key in error text
 
 ### Success Criteria:
@@ -75,14 +75,18 @@ Add a `db.crackJokes(description, show_metadata)` method to the Database shell A
 - **`packages/shell-api/src/database.spec.ts`**: Add `describe('crackJokes', ...)` test suite following existing patterns:
   - **Setup**: Use `stubInterface<ServiceProvider>()` pattern from existing `beforeEach`. Stub `globalThis.fetch` with sinon for HTTP mocking
   - **Happy path (default)**: Stub fetch to return valid response JSON, verify method returns a string
-  - **Happy path (show_metadata=true)**: Verify method returns `{ joke, metadata: { collectionsUsed, model } }`
-  - **Missing env vars**: Unset each `AZURE_OPENAI_*` var individually, verify appropriate setup message returned
+  - **Happy path (show_metadata=true)**: Verify method returns `{ joke, metadata: { collectionsUsed, deployment } }`
+  - **Missing env vars**: Unset each `AZURE_OPENAI_*` var individually, verify returned message includes the missing variable name and a setup example. Unset all three, verify a consolidated message lists all of them
   - **API failure**: Stub fetch to reject or return non-OK status, verify actionable error string returned (no API key in message)
+  - **Malformed response**: Stub fetch to return 200 with empty or unexpected JSON body, verify actionable error string returned
+  - **Network timeout**: Stub fetch to reject with a timeout error, verify error message includes timeout context
   - **Empty database**: Stub `listCollections` to return `[]`, verify joke still returned
   - **Empty collections**: Stub collections with 0 documents, verify joke returned
   - **Collection cap**: Stub 25+ collection names, verify only first 20 are used
   - **Large field truncation**: Include sample doc with >1000 char field, verify it's truncated in prompt
+  - **Binary field omission**: Include sample doc with Binary-type field, verify it's omitted from prompt
   - **Empty/missing description**: Call with `""` and with no args, verify no error
+  - **Long description truncation**: Call with >500 char description, verify outgoing prompt truncates it to 500 chars
   - **Statelessness**: Verify no conversation state persisted between calls (no `previous_response_id` in request body)
   - **Teardown**: Restore `globalThis.fetch` stub in `afterEach`
 

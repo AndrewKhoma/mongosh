@@ -7,7 +7,7 @@
 
 MongoDB Shell users spend significant time working with databases — inspecting collections, querying documents, and managing schemas. The `db.crackJokes()` command brings levity to this workflow by generating contextual dad jokes that reference the user's actual data. A user provides a short description of what kind of joke they want, and the command gathers metadata from the current database — collection names, document counts, field structures, and sample documents — then sends it along with the description to an Azure-hosted OpenAI instance to produce a personalized dad joke.
 
-By default, the command returns just the joke text as a plain string for a clean shell experience. An optional second parameter `show_metadata` (defaults to `false`) switches the return value to a structured document that includes the joke alongside metadata about which collections, indexes, and samples were used, plus the model name — useful for debugging or curiosity.
+By default, the command returns just the joke text as a plain string for a clean shell experience. An optional second parameter `show_metadata` (defaults to `false`) switches the return value to a structured document that includes the joke alongside metadata about which collections and samples were used, plus the model name — useful for debugging or curiosity.
 
 Each invocation is fully stateless: every call sends a fresh, self-contained prompt to the Azure OpenAI endpoint with no conversation history or session context carried over from previous calls. This ensures jokes are never influenced by prior queries and remain independently generated. The Azure OpenAI connection is configured entirely through environment variables, keeping credentials out of code and shell history. The command works across all MongoDB topologies.
 
@@ -30,7 +30,7 @@ Independent Test: Run `db.crackJokes("anything")` against a database with at lea
 
 Acceptance Scenarios:
 1. Given a database with collections and valid Azure OpenAI env vars configured, When the user runs `db.crackJokes("tell me something about my data")`, Then a plain string containing the joke is returned
-2. Given the same setup, When the user runs `db.crackJokes("tell me something", true)`, Then a document is returned with `{ joke: <string>, metadata: { collectionsUsed: [...], model: <string> } }`
+2. Given the same setup, When the user runs `db.crackJokes("tell me something", true)`, Then a document is returned with `{ joke: <string>, metadata: { collectionsUsed: [...], deployment: <string> } }`
 3. Given a database with multiple collections, When the user runs `db.crackJokes("joke about users", true)`, Then the metadata includes the collection names that were inspected
 4. Given valid configuration, When the command runs, Then sample documents (up to 5 per collection) are included in the prompt sent to Azure OpenAI
 5. Given the user runs `db.crackJokes("topic A")` followed by `db.crackJokes("topic B")`, Then the second joke has no influence from or reference to the first call — each call is independent
@@ -44,7 +44,7 @@ Independent Test: Unset all Azure OpenAI env vars and run `db.crackJokes("test")
 Acceptance Scenarios:
 1. Given `AZURE_OPENAI_ENDPOINT` is not set, When the user runs `db.crackJokes("test")`, Then a plain-language message is returned listing the required environment variables and setup steps
 2. Given `AZURE_OPENAI_API_KEY` is not set, When the user runs `db.crackJokes("test")`, Then a plain-language message is returned explaining the API key is missing
-3. Given `AZURE_OPENAI_MODEL` is not set, When the user runs `db.crackJokes("test")`, Then a plain-language message is returned explaining the model name is missing
+3. Given `AZURE_OPENAI_DEPLOYMENT` is not set, When the user runs `db.crackJokes("test")`, Then a plain-language message is returned explaining the model name is missing
 4. Given all env vars are set but the API key is invalid, When the user runs `db.crackJokes("test")`, Then a plain-language error message is returned explaining the API call failed (no stack trace)
 
 ### User Story P3 – Works on Empty Databases
@@ -73,11 +73,11 @@ Acceptance Scenarios:
 - FR-001: Add `db.crackJokes(description, show_metadata)` command to the shell. `description` is an optional string (empty/missing = generic joke request). `show_metadata` is an optional boolean defaulting to `false` (Stories: P1, P3)
 - FR-002: Collect metadata from the current database: collection names, document counts, field/schema info from each collection, and up to 5 sample documents per collection (Stories: P1, P3)
 - FR-003: Cap metadata collection to at most 20 collections when the database has many collections to control prompt size and token cost (Stories: P1)
-- FR-004: Read Azure OpenAI configuration from environment variables: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_MODEL` (Stories: P1, P2)
+- FR-004: Read Azure OpenAI configuration from environment variables: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT` (Stories: P1, P2)
 - FR-005: Construct a prompt that sets the AI persona as a professional standup comedian and provides the collected metadata plus user description as the user's request, instructing the model to generate a dad joke (Stories: P1)
 - FR-006: Each API call must be stateless — send a self-contained prompt with no conversation history or session context from previous calls (Stories: P1)
 - FR-007: Make an HTTP request to the Azure OpenAI endpoint with the constructed prompt (Stories: P1)
-- FR-008: When `show_metadata` is `false` (default), return the joke as a plain string. When `true`, return a document: `{ joke: string, metadata: { collectionsUsed: string[], model: string } }` (Stories: P1)
+- FR-008: When `show_metadata` is `false` (default), return the joke as a plain string. When `true`, return a document: `{ joke: string, metadata: { collectionsUsed: string[], deployment: string } }` (Stories: P1)
 - FR-009: Return an actionable, plain-language error message (no stack traces) when required environment variables are missing, listing the variable names and setup steps (Stories: P2)
 - FR-010: Return an actionable, plain-language error message when the API call fails (invalid key, network error, timeout, rate limit), describing the failure without exposing the API key value (Stories: P2)
 - FR-011: Handle empty databases and empty collections gracefully, still producing a joke (Stories: P3)
@@ -87,7 +87,7 @@ Acceptance Scenarios:
 ### Key Entities
 
 - **Return value (default)**: A plain string containing the joke text
-- **Return value (show_metadata=true)**: A document containing `joke` (string) and `metadata` (object with `collectionsUsed` array and `model` string)
+- **Return value (show_metadata=true)**: A document containing `joke` (string) and `metadata` (object with `collectionsUsed` array and `deployment` string)
 
 ### Cross-Cutting / Non-Functional
 
@@ -108,7 +108,7 @@ Acceptance Scenarios:
 ## Assumptions
 
 - The Azure OpenAI endpoint accepts standard API key authentication
-- The `AZURE_OPENAI_MODEL` variable contains a valid model name available on the user's Azure OpenAI resource (e.g., `gpt-4o`)
+- The `AZURE_OPENAI_DEPLOYMENT` variable contains a valid deployment name on the user's Azure OpenAI resource
 - Dad jokes are the desired humor style — no configurable tone/style setting is needed for v1
 - The shell can make outbound HTTP requests to external endpoints from within a database command
 
