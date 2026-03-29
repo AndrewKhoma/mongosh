@@ -74,7 +74,7 @@ Acceptance Scenarios:
 - FR-002: Collect metadata from the current database: collection names, document counts, field/schema info from each collection, and up to 5 sample documents per collection (Stories: P1, P3)
 - FR-003: Cap metadata collection to at most 20 collections when the database has many collections to control prompt size and token cost (Stories: P1)
 - FR-004: Read Azure OpenAI configuration from environment variables: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_MODEL` (Stories: P1, P2)
-- FR-005: Construct a prompt combining the collected metadata and user description, instructing the model to generate a dad joke (Stories: P1)
+- FR-005: Construct a prompt that sets the AI persona as a professional standup comedian and provides the collected metadata plus user description as the user's request, instructing the model to generate a dad joke (Stories: P1)
 - FR-006: Each API call must be stateless — send a self-contained prompt with no conversation history or session context from previous calls (Stories: P1)
 - FR-007: Make an HTTP request to the Azure OpenAI endpoint with the constructed prompt (Stories: P1)
 - FR-008: When `show_metadata` is `false` (default), return the joke as a plain string. When `true`, return a document: `{ joke: string, metadata: { collectionsUsed: string[], model: string } }` (Stories: P1)
