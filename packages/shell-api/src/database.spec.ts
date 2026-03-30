@@ -3402,38 +3402,37 @@ describe('Database', function () {
         expect(result.metadata.collectionsUsed).to.not.include('coll20');
       });
 
-      it('truncates fields longer than 1000 characters in prompt', async function () {
-        const longString = 'x'.repeat(1500);
-        const cursorWithLongField = {
-          toArray: sinon.stub().resolves([{ _id: 1, longField: longString }]),
-        };
-        serviceProvider.find.returns(cursorWithLongField as any);
-
+      it('sends only field names, not document values, in prompt', async function () {
         await database.crackJokes('test');
         const body = JSON.parse(fetchStub.firstCall.args[1].body);
         const userContent = body.input[1].content;
-        expect(userContent).to.not.include(longString);
-        expect(userContent).to.include('...[truncated]');
+        // Field names should appear
+        expect(userContent).to.include('name');
+        expect(userContent).to.include('age');
+        // Actual document values should NOT appear
+        expect(userContent).to.not.include('Alice');
+        expect(userContent).to.not.include('Bob');
       });
 
-      it('omits Binary fields from sample documents in prompt', async function () {
-        const cursorWithBinary = {
+      it('does not send Binary or sensitive field values in prompt', async function () {
+        const cursorWithSensitive = {
           toArray: sinon.stub().resolves([
             {
               _id: 1,
-              name: 'test',
+              password: 'secret123',
               binData: new bson.Binary(Buffer.from('hello')),
             },
           ]),
         };
-        serviceProvider.find.returns(cursorWithBinary as any);
+        serviceProvider.find.returns(cursorWithSensitive as any);
 
         await database.crackJokes('test');
         const body = JSON.parse(fetchStub.firstCall.args[1].body);
         const userContent = body.input[1].content;
-        // The sanitized sample documents should not contain the binary value
-        expect(userContent).to.include('"name"');
+        expect(userContent).to.not.include('secret123');
         expect(userContent).to.not.include('aGVsbG8=');
+        // But field names are still listed
+        expect(userContent).to.include('password');
       });
 
       it('handles empty string description', async function () {
@@ -3508,11 +3507,12 @@ describe('Database', function () {
 
         const result = await database.crackJokes('test');
         expect(result).to.be.a('string');
+        // Field names extracted without crash
         const body = JSON.parse(fetchStub.firstCall.args[1].body);
-        expect(body.input[1].content).to.include('circular reference');
+        expect(body.input[1].content).to.include('name');
       });
 
-      it('handles deeply nested documents without crashing', async function () {
+      it('extracts field names from deeply nested documents without crashing', async function () {
         let deep: any = { value: 'leaf' };
         for (let i = 0; i < 100; i++) {
           deep = { nested: deep };
@@ -3525,10 +3525,10 @@ describe('Database', function () {
         const result = await database.crackJokes('test');
         expect(result).to.be.a('string');
         const body = JSON.parse(fetchStub.firstCall.args[1].body);
-        expect(body.input[1].content).to.include('nested too deeply');
+        expect(body.input[1].content).to.include('data');
       });
 
-      it('preserves Date and RegExp objects as strings in prompt', async function () {
+      it('extracts field names from docs with special types', async function () {
         const cursorWithSpecialTypes = {
           toArray: sinon.stub().resolves([
             {
@@ -3543,8 +3543,10 @@ describe('Database', function () {
         await database.crackJokes('test');
         const body = JSON.parse(fetchStub.firstCall.args[1].body);
         const userContent = body.input[1].content;
-        expect(userContent).to.include('2024-01-15');
-        expect(userContent).to.include('/test/i');
+        expect(userContent).to.include('createdAt');
+        expect(userContent).to.include('pattern');
+        // Values should NOT be in prompt — only field names
+        expect(userContent).to.not.include('2024-01-15');
       });
 
       it('truncates prompt when metadata is very large', async function () {

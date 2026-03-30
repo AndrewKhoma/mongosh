@@ -1982,10 +1982,6 @@ export class Database<
         );
         const samples = await cursor.toArray();
 
-        const sanitizedSamples = samples.map((doc: Document) =>
-          sanitizeDocForPrompt(doc)
-        );
-
         const fields =
           samples.length > 0
             ? [...new Set(samples.flatMap((d: Document) => Object.keys(d)))]
@@ -1995,7 +1991,6 @@ export class Database<
           name,
           documentCount: count,
           fields,
-          sampleDocuments: sanitizedSamples,
         });
       } catch {
         collectionsMetadata.push({ name, error: 'Could not inspect' });
@@ -2003,26 +1998,18 @@ export class Database<
     }
 
     // --- Prompt construction ---
+    // Only structural metadata (names, counts, fields) is sent — no document values
     let metadataText =
       collectionNames.length === 0
         ? 'This database is empty — it has no collections.'
         : collectionsMetadata
             .map((c) => {
               if (c.error) return `Collection "${c.name}": ${c.error}`;
-              return (
-                `Collection "${c.name}" (${
-                  c.documentCount
-                } documents, fields: [${(c.fields as string[]).join(
-                  ', '
-                )}]):\n` +
-                `Sample documents: ${JSON.stringify(
-                  c.sampleDocuments,
-                  null,
-                  2
-                )}`
-              );
+              return `Collection "${c.name}" (${
+                c.documentCount
+              } documents, fields: [${(c.fields as string[]).join(', ')}])`;
             })
-            .join('\n\n');
+            .join('\n');
 
     // Cap total prompt size to avoid exceeding model context windows
     if (metadataText.length > MAX_PROMPT_CHARS) {
