@@ -77,12 +77,12 @@ const CRACK_JOKES_CONFIG = {
   SYSTEM_PROMPT:
     'You are a pro standup comedian. Your job is to tell exactly one short dad joke ' +
     'based on the database metadata the user provides. The joke must reference specific ' +
-    'details from their data (collection names, field names, document values). ' +
+    'details from their data (collection names, field names, document counts). ' +
     'Keep it family-friendly, punny, and under 280 characters. Respond with ONLY the joke text, nothing else.',
 } as const;
 
 /** Validated Azure OpenAI connection config. */
-interface AzureOpenAIConfig {
+interface LLMProviderConfig {
   endpoint: string;
   apiKey: string;
   deployment: string;
@@ -109,7 +109,7 @@ interface JokeResult {
  * Reads Azure OpenAI config from environment variables.
  * Throws MongoshRuntimeError if any required variable is missing.
  */
-function getAzureOpenAIConfig(): AzureOpenAIConfig {
+function getLLMProviderConfig(): LLMProviderConfig {
   const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
   const apiKey = process.env.AZURE_OPENAI_API_KEY;
   const deployment = process.env.AZURE_OPENAI_DEPLOYMENT;
@@ -136,7 +136,7 @@ function getAzureOpenAIConfig(): AzureOpenAIConfig {
     );
   }
 
-  return { endpoint, apiKey, deployment } as AzureOpenAIConfig;
+  return { endpoint, apiKey, deployment } as LLMProviderConfig;
 }
 
 /** Builds the user-facing prompt from collected metadata and description. */
@@ -180,8 +180,8 @@ function buildJokePrompt(
  * Calls Azure OpenAI and returns the raw response document.
  * Throws MongoshRuntimeError on HTTP or network failures.
  */
-async function callAzureOpenAI(
-  config: AzureOpenAIConfig,
+async function callLLMProvider(
+  config: LLMProviderConfig,
   requestBody: Document
 ): Promise<Document> {
   const url = `${config.endpoint.replace(
@@ -2068,14 +2068,14 @@ export class Database<
       showMetadata: showMetadata ?? false,
     });
 
-    const config = getAzureOpenAIConfig();
+    const config = getLLMProviderConfig();
     const desc = (description ?? '').slice(
       0,
       CRACK_JOKES_CONFIG.MAX_DESCRIPTION_CHARS
     );
     const metadata = await this._collectDatabaseMetadata();
     const requestBody = buildJokePrompt(metadata, desc, config.deployment);
-    const responseData = await callAzureOpenAI(config, requestBody);
+    const responseData = await callLLMProvider(config, requestBody);
     const jokeText = parseJokeFromResponse(responseData);
 
     if (showMetadata) {
