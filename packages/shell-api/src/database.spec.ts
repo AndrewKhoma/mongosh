@@ -3239,8 +3239,10 @@ describe('Database', function () {
         serviceProvider.find.returns(fakeCursor as any);
 
         fetchStub = sinon.stub(globalThis, 'fetch');
-        fetchStub.resolves(
-          new Response(JSON.stringify(VALID_RESPONSE), { status: 200 })
+        fetchStub.callsFake(() =>
+          Promise.resolve(
+            new Response(JSON.stringify(VALID_RESPONSE), { status: 200 })
+          )
         );
       });
 
@@ -3276,49 +3278,71 @@ describe('Database', function () {
         expect(result.metadata.deployment).to.equal('test-deployment');
       });
 
-      it('returns setup message when AZURE_OPENAI_ENDPOINT is missing', async function () {
+      it('throws MongoshRuntimeError when AZURE_OPENAI_ENDPOINT is missing', async function () {
         delete process.env.AZURE_OPENAI_ENDPOINT;
-        const result = await database.crackJokes('test');
-        expect(result).to.be.a('string');
-        expect(result as string).to.include('AZURE_OPENAI_ENDPOINT');
-        expect(result as string).to.include('not configured');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('AZURE_OPENAI_ENDPOINT');
+          expect(e.message).to.include('not configured');
+        }
       });
 
-      it('returns setup message when AZURE_OPENAI_API_KEY is missing', async function () {
+      it('throws MongoshRuntimeError when AZURE_OPENAI_API_KEY is missing', async function () {
         delete process.env.AZURE_OPENAI_API_KEY;
-        const result = await database.crackJokes('test');
-        expect(result).to.be.a('string');
-        expect(result as string).to.include('AZURE_OPENAI_API_KEY');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('AZURE_OPENAI_API_KEY');
+        }
       });
 
-      it('returns setup message when AZURE_OPENAI_DEPLOYMENT is missing', async function () {
+      it('throws MongoshRuntimeError when AZURE_OPENAI_DEPLOYMENT is missing', async function () {
         delete process.env.AZURE_OPENAI_DEPLOYMENT;
-        const result = await database.crackJokes('test');
-        expect(result).to.be.a('string');
-        expect(result as string).to.include('AZURE_OPENAI_DEPLOYMENT');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('AZURE_OPENAI_DEPLOYMENT');
+        }
       });
 
-      it('returns consolidated message when all env vars are missing', async function () {
+      it('throws consolidated error when all env vars are missing', async function () {
         delete process.env.AZURE_OPENAI_ENDPOINT;
         delete process.env.AZURE_OPENAI_API_KEY;
         delete process.env.AZURE_OPENAI_DEPLOYMENT;
-        const result = (await database.crackJokes('test')) as string;
-        expect(result).to.include('AZURE_OPENAI_ENDPOINT');
-        expect(result).to.include('AZURE_OPENAI_API_KEY');
-        expect(result).to.include('AZURE_OPENAI_DEPLOYMENT');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('AZURE_OPENAI_ENDPOINT');
+          expect(e.message).to.include('AZURE_OPENAI_API_KEY');
+          expect(e.message).to.include('AZURE_OPENAI_DEPLOYMENT');
+        }
       });
 
-      it('returns actionable error when API returns non-OK status', async function () {
+      it('throws on API non-OK status without leaking API key', async function () {
         fetchStub.resolves(
           new Response('Unauthorized', {
             status: 401,
             statusText: 'Unauthorized',
           })
         );
-        const result = (await database.crackJokes('test')) as string;
-        expect(result).to.include('Azure OpenAI request failed');
-        expect(result).to.include('401');
-        expect(result).to.not.include('test-api-key-12345');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('Azure OpenAI request failed');
+          expect(e.message).to.include('401');
+          expect(e.message).to.not.include('test-api-key-12345');
+        }
       });
 
       it('scrubs API key from error response body', async function () {
@@ -3327,38 +3351,62 @@ describe('Database', function () {
             status: 403,
           })
         );
-        const result = (await database.crackJokes('test')) as string;
-        expect(result).to.not.include('test-api-key-12345');
-        expect(result).to.include('[REDACTED]');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e.message).to.not.include('test-api-key-12345');
+          expect(e.message).to.include('[REDACTED]');
+        }
       });
 
-      it('returns actionable error on malformed response', async function () {
+      it('throws on malformed response', async function () {
         fetchStub.resolves(
           new Response(JSON.stringify({ unexpected: 'data' }), { status: 200 })
         );
-        const result = (await database.crackJokes('test')) as string;
-        expect(result).to.include('unexpected response');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('unexpected response');
+        }
       });
 
-      it('returns actionable error with empty response body', async function () {
+      it('throws on empty response body', async function () {
         fetchStub.resolves(new Response(JSON.stringify({}), { status: 200 }));
-        const result = (await database.crackJokes('test')) as string;
-        expect(result).to.include('unexpected response');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('unexpected response');
+        }
       });
 
-      it('returns timeout-specific error on network timeout', async function () {
+      it('throws timeout-specific error on network timeout', async function () {
         const timeoutError = new Error('network timeout');
         timeoutError.name = 'AbortError';
         fetchStub.rejects(timeoutError);
-        const result = (await database.crackJokes('test')) as string;
-        expect(result).to.include('timed out');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('timed out');
+        }
       });
 
-      it('returns error on generic network failure', async function () {
+      it('throws on generic network failure', async function () {
         fetchStub.rejects(new Error('ECONNREFUSED'));
-        const result = (await database.crackJokes('test')) as string;
-        expect(result).to.include('Failed to call Azure OpenAI');
-        expect(result).to.include('ECONNREFUSED');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('Failed to call Azure OpenAI');
+          expect(e.message).to.include('ECONNREFUSED');
+        }
       });
 
       it('scrubs API key from fetch exception messages', async function () {
@@ -3367,9 +3415,13 @@ describe('Database', function () {
             'request to https://example.com failed, key test-api-key-12345 rejected'
           )
         );
-        const result = (await database.crackJokes('test')) as string;
-        expect(result).to.not.include('test-api-key-12345');
-        expect(result).to.include('[REDACTED]');
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e.message).to.not.include('test-api-key-12345');
+          expect(e.message).to.include('[REDACTED]');
+        }
       });
 
       it('works on empty database', async function () {
