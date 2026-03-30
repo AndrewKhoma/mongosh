@@ -65,6 +65,205 @@ import type {
 import type { MQLPipeline } from './mql-types';
 import type { Abortable } from 'events';
 
+/** Configuration constants for the crackJokes command. */
+const CRACK_JOKES_CONFIG = {
+  MAX_DESCRIPTION_CHARS: 500,
+  MAX_COLLECTIONS: 20,
+  SAMPLE_DOCS_PER_COLLECTION: 5,
+  MAX_PROMPT_CHARS: 50000,
+  TIMEOUT_MS: 30000,
+  ERROR_PREVIEW_CHARS: 200,
+  AZURE_API_VERSION: '2025-03-01-preview',
+  SYSTEM_PROMPT:
+    'You are a pro standup comedian. Your job is to tell exactly one short dad joke ' +
+    'based on the database metadata the user provides. The joke must reference specific ' +
+    'details from their data (collection names, field names, document counts). ' +
+    'Keep it family-friendly, punny, and under 280 characters. Respond with ONLY the joke text, nothing else.',
+} as const;
+
+/** Validated Azure OpenAI connection config. */
+interface LLMProviderConfig {
+  endpoint: string;
+  apiKey: string;
+  deployment: string;
+}
+
+/** Structural metadata collected from a single collection. */
+interface CollectionMetadata {
+  name: string;
+  documentCount?: number;
+  fields?: string[];
+  error?: string;
+}
+
+/** Structured return value when showMetadata is true. */
+interface JokeResult {
+  joke: string;
+  metadata: {
+    collectionsUsed: string[];
+    deployment: string;
+  };
+}
+
+/**
+ * Reads Azure OpenAI config from environment variables.
+ * Throws MongoshRuntimeError if any required variable is missing.
+ */
+function getLLMProviderConfig(): LLMProviderConfig {
+  const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
+  const apiKey = process.env.AZURE_OPENAI_API_KEY;
+  const deployment = process.env.AZURE_OPENAI_DEPLOYMENT;
+
+  const missing: string[] = [];
+  if (!endpoint)
+    missing.push(
+      'AZURE_OPENAI_ENDPOINT (e.g. export AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com)'
+    );
+  if (!apiKey)
+    missing.push(
+      'AZURE_OPENAI_API_KEY (e.g. export AZURE_OPENAI_API_KEY=your-api-key)'
+    );
+  if (!deployment)
+    missing.push(
+      'AZURE_OPENAI_DEPLOYMENT (e.g. export AZURE_OPENAI_DEPLOYMENT=your-deployment-name)'
+    );
+
+  if (missing.length > 0) {
+    throw new MongoshRuntimeError(
+      'Azure OpenAI is not configured. Please set the following environment variable(s):\n' +
+        missing.map((m) => `  - ${m}`).join('\n'),
+      ShellApiErrors.AzureOpenAIConfigMissing
+    );
+  }
+
+  return { endpoint, apiKey, deployment } as LLMProviderConfig;
+}
+
+/** Builds the user-facing prompt from collected metadata and description. */
+function buildJokePrompt(
+  metadata: CollectionMetadata[],
+  description: string,
+  deployment: string
+): Document {
+  let metadataText =
+    metadata.length === 0
+      ? 'This database is empty — it has no collections.'
+      : metadata
+          .map((c) => {
+            if (c.error) return `Collection "${c.name}": ${c.error}`;
+            return `Collection "${c.name}" (${
+              c.documentCount
+            } documents, fields: [${c.fields?.join(', ')}])`;
+          })
+          .join('\n');
+
+  if (metadataText.length > CRACK_JOKES_CONFIG.MAX_PROMPT_CHARS) {
+    metadataText =
+      metadataText.slice(0, CRACK_JOKES_CONFIG.MAX_PROMPT_CHARS) +
+      '\n\n...[metadata truncated to fit context window]';
+  }
+
+  const userMessage = description
+    ? `The user wants a joke about: "${description}"\n\n${metadataText}`
+    : metadataText;
+
+  return {
+    model: deployment,
+    input: [
+      { role: 'developer', content: CRACK_JOKES_CONFIG.SYSTEM_PROMPT },
+      { role: 'user', content: userMessage },
+    ],
+  };
+}
+
+/**
+ * Calls Azure OpenAI and returns the raw response document.
+ * Throws MongoshRuntimeError on HTTP or network failures.
+ */
+async function callLLMProvider(
+  config: LLMProviderConfig,
+  requestBody: Document
+): Promise<Document> {
+  const url = `${config.endpoint.replace(
+    /\/+$/,
+    ''
+  )}/openai/responses?api-version=${CRACK_JOKES_CONFIG.AZURE_API_VERSION}`;
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': config.apiKey,
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(CRACK_JOKES_CONFIG.TIMEOUT_MS),
+    });
+  } catch (err: any) {
+    const message =
+      err?.name === 'AbortError' || err?.code === 'ETIMEDOUT'
+        ? 'Request timed out.'
+        : scrubApiKey(err?.message ?? 'Unknown network error', config.apiKey);
+    throw new MongoshRuntimeError(
+      `Failed to call Azure OpenAI: ${message}. Check your endpoint URL and network connection.`,
+      CommonErrors.CommandFailed
+    );
+  }
+
+  if (!response.ok) {
+    let errorText = await response.text().catch(() => 'Unknown error');
+    errorText = scrubApiKey(errorText, config.apiKey);
+    throw new MongoshRuntimeError(
+      `Azure OpenAI request failed (HTTP ${response.status}): ${errorText.slice(
+        0,
+        CRACK_JOKES_CONFIG.ERROR_PREVIEW_CHARS
+      )}. Check your endpoint and deployment configuration.`,
+      CommonErrors.CommandFailed
+    );
+  }
+
+  try {
+    return (await response.json()) as Document;
+  } catch {
+    throw new MongoshRuntimeError(
+      'Azure OpenAI returned an invalid response format. Check your endpoint and deployment configuration.',
+      CommonErrors.CommandFailed
+    );
+  }
+}
+
+/** Extracts the joke text from an Azure OpenAI Responses API response. */
+function parseJokeFromResponse(responseData: Document): string {
+  const output = responseData?.output;
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      if (item.type === 'message' && Array.isArray(item.content)) {
+        for (const content of item.content) {
+          if (
+            content.type === 'output_text' &&
+            typeof content.text === 'string'
+          ) {
+            return content.text;
+          }
+        }
+      }
+    }
+  }
+  throw new MongoshRuntimeError(
+    'Azure OpenAI returned an unexpected response. The joke could not be extracted. Try again or check your deployment configuration.',
+    CommonErrors.CommandFailed
+  );
+}
+
+/** Replaces occurrences of the API key in a string with [REDACTED]. */
+function scrubApiKey(text: string, apiKey: string): string {
+  return text.replace(
+    new RegExp(apiKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
+    '[REDACTED]'
+  );
+}
+
 export type CollectionNamesWithTypes = {
   name: string;
   badge: string;
@@ -1867,5 +2066,71 @@ export class Database<
       checkMetadataConsistency: 1,
       ...options,
     });
+  }
+
+  @returnsPromise
+  @apiVersions([])
+  async crackJokes(
+    description?: string,
+    showMetadata?: boolean
+  ): Promise<string | JokeResult> {
+    this._emitDatabaseApiCall('crackJokes', {
+      showMetadata: showMetadata ?? false,
+    });
+
+    const config = getLLMProviderConfig();
+    const desc = (description ?? '').slice(
+      0,
+      CRACK_JOKES_CONFIG.MAX_DESCRIPTION_CHARS
+    );
+    const metadata = await this._collectDatabaseMetadata();
+    const requestBody = buildJokePrompt(metadata, desc, config.deployment);
+    const responseData = await callLLMProvider(config, requestBody);
+    const jokeText = parseJokeFromResponse(responseData);
+
+    if (showMetadata) {
+      return {
+        joke: jokeText,
+        metadata: {
+          collectionsUsed: metadata.map((c) => c.name),
+          deployment: config.deployment,
+        },
+      };
+    }
+
+    return jokeText;
+  }
+
+  private async _collectDatabaseMetadata(): Promise<CollectionMetadata[]> {
+    const allNames = await this._getCollectionNames();
+    const names = allNames.slice(0, CRACK_JOKES_CONFIG.MAX_COLLECTIONS);
+
+    const results: CollectionMetadata[] = [];
+    for (const name of names) {
+      try {
+        const count = await this._mongo._serviceProvider.estimatedDocumentCount(
+          this._name,
+          name
+        );
+
+        const cursor = this._mongo._serviceProvider.find(
+          this._name,
+          name,
+          {},
+          { limit: CRACK_JOKES_CONFIG.SAMPLE_DOCS_PER_COLLECTION }
+        );
+        const samples = await cursor.toArray();
+
+        const fields =
+          samples.length > 0
+            ? [...new Set(samples.flatMap((d: Document) => Object.keys(d)))]
+            : [];
+
+        results.push({ name, documentCount: count, fields });
+      } catch {
+        results.push({ name, error: 'Could not inspect' });
+      }
+    }
+    return results;
   }
 }

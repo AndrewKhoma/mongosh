@@ -3195,5 +3195,478 @@ describe('Database', function () {
         ).to.equal(internalSession);
       }
     });
+
+    describe('crackJokes', function () {
+      const VALID_RESPONSE = {
+        output: [
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: 'Why did the MongoDB collection break up with SQL? Because it found the relationship too structured!',
+              },
+            ],
+          },
+        ],
+      };
+
+      let fetchStub: sinon.SinonStub;
+      let savedEnv: Record<string, string | undefined>;
+
+      beforeEach(function () {
+        savedEnv = {
+          AZURE_OPENAI_ENDPOINT: process.env.AZURE_OPENAI_ENDPOINT,
+          AZURE_OPENAI_API_KEY: process.env.AZURE_OPENAI_API_KEY,
+          AZURE_OPENAI_DEPLOYMENT: process.env.AZURE_OPENAI_DEPLOYMENT,
+        };
+        process.env.AZURE_OPENAI_ENDPOINT =
+          'https://test-resource.openai.azure.com';
+        process.env.AZURE_OPENAI_API_KEY = 'test-api-key-12345';
+        process.env.AZURE_OPENAI_DEPLOYMENT = 'test-deployment';
+
+        serviceProvider.listCollections.resolves([
+          { name: 'users', type: 'collection' },
+          { name: 'orders', type: 'collection' },
+        ]);
+        serviceProvider.estimatedDocumentCount.resolves(42);
+        const fakeCursor = {
+          toArray: sinon.stub().resolves([
+            { _id: 1, name: 'Alice', age: 30 },
+            { _id: 2, name: 'Bob', age: 25 },
+          ]),
+        };
+        serviceProvider.find.returns(fakeCursor as any);
+
+        fetchStub = sinon.stub(globalThis, 'fetch');
+        fetchStub.callsFake(() =>
+          Promise.resolve(
+            new Response(JSON.stringify(VALID_RESPONSE), { status: 200 })
+          )
+        );
+      });
+
+      afterEach(function () {
+        fetchStub.restore();
+        for (const [key, val] of Object.entries(savedEnv)) {
+          if (val === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = val;
+          }
+        }
+      });
+
+      it('returns a joke string by default', async function () {
+        const result = await database.crackJokes('tell me a joke');
+        expect(result).to.be.a('string');
+        expect(result).to.include('MongoDB');
+      });
+
+      it('returns structured document when showMetadata is true', async function () {
+        const result = (await database.crackJokes(
+          'tell me a joke',
+          true
+        )) as Document;
+        expect(result).to.have.property('joke');
+        expect(result.joke).to.be.a('string');
+        expect(result).to.have.nested.property('metadata.collectionsUsed');
+        expect(result.metadata.collectionsUsed).to.deep.equal([
+          'users',
+          'orders',
+        ]);
+        expect(result.metadata.deployment).to.equal('test-deployment');
+      });
+
+      it('throws MongoshRuntimeError when AZURE_OPENAI_ENDPOINT is missing', async function () {
+        delete process.env.AZURE_OPENAI_ENDPOINT;
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('AZURE_OPENAI_ENDPOINT');
+          expect(e.message).to.include('not configured');
+        }
+      });
+
+      it('throws MongoshRuntimeError when AZURE_OPENAI_API_KEY is missing', async function () {
+        delete process.env.AZURE_OPENAI_API_KEY;
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('AZURE_OPENAI_API_KEY');
+        }
+      });
+
+      it('throws MongoshRuntimeError when AZURE_OPENAI_DEPLOYMENT is missing', async function () {
+        delete process.env.AZURE_OPENAI_DEPLOYMENT;
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('AZURE_OPENAI_DEPLOYMENT');
+        }
+      });
+
+      it('throws consolidated error when all env vars are missing', async function () {
+        delete process.env.AZURE_OPENAI_ENDPOINT;
+        delete process.env.AZURE_OPENAI_API_KEY;
+        delete process.env.AZURE_OPENAI_DEPLOYMENT;
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('AZURE_OPENAI_ENDPOINT');
+          expect(e.message).to.include('AZURE_OPENAI_API_KEY');
+          expect(e.message).to.include('AZURE_OPENAI_DEPLOYMENT');
+        }
+      });
+
+      it('throws on API non-OK status without leaking API key', async function () {
+        fetchStub.resolves(
+          new Response('Unauthorized', {
+            status: 401,
+            statusText: 'Unauthorized',
+          })
+        );
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('Azure OpenAI request failed');
+          expect(e.message).to.include('401');
+          expect(e.message).to.not.include('test-api-key-12345');
+        }
+      });
+
+      it('scrubs API key from error response body', async function () {
+        fetchStub.resolves(
+          new Response('Error: invalid key test-api-key-12345 was rejected', {
+            status: 403,
+          })
+        );
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e.message).to.not.include('test-api-key-12345');
+          expect(e.message).to.include('[REDACTED]');
+        }
+      });
+
+      it('throws on malformed response', async function () {
+        fetchStub.resolves(
+          new Response(JSON.stringify({ unexpected: 'data' }), { status: 200 })
+        );
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('unexpected response');
+        }
+      });
+
+      it('throws on empty response body', async function () {
+        fetchStub.resolves(new Response(JSON.stringify({}), { status: 200 }));
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('unexpected response');
+        }
+      });
+
+      it('throws on non-JSON response body', async function () {
+        fetchStub.callsFake(() =>
+          Promise.resolve(
+            new Response('<html>Gateway Error</html>', { status: 200 })
+          )
+        );
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('invalid response format');
+        }
+      });
+
+      it('throws timeout-specific error on network timeout', async function () {
+        const timeoutError = new Error('network timeout');
+        timeoutError.name = 'AbortError';
+        fetchStub.rejects(timeoutError);
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('timed out');
+        }
+      });
+
+      it('throws on generic network failure', async function () {
+        fetchStub.rejects(new Error('ECONNREFUSED'));
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('Failed to call Azure OpenAI');
+          expect(e.message).to.include('ECONNREFUSED');
+        }
+      });
+
+      it('scrubs API key from fetch exception messages', async function () {
+        fetchStub.rejects(
+          new Error(
+            'request to https://example.com failed, key test-api-key-12345 rejected'
+          )
+        );
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e.message).to.not.include('test-api-key-12345');
+          expect(e.message).to.include('[REDACTED]');
+        }
+      });
+
+      it('works on empty database', async function () {
+        serviceProvider.listCollections.resolves([]);
+        const result = await database.crackJokes('surprise me');
+        expect(result).to.be.a('string');
+        expect(fetchStub).to.have.been.calledOnce;
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content).to.include('empty');
+      });
+
+      it('works on database with empty collections', async function () {
+        serviceProvider.estimatedDocumentCount.resolves(0);
+        const emptyCursor = { toArray: sinon.stub().resolves([]) };
+        serviceProvider.find.returns(emptyCursor as any);
+        const result = await database.crackJokes('tell me');
+        expect(result).to.be.a('string');
+        expect(fetchStub).to.have.been.calledOnce;
+      });
+
+      it('gracefully handles collection inspection errors', async function () {
+        serviceProvider.listCollections.resolves([
+          { name: 'working', type: 'collection' },
+          { name: 'broken', type: 'collection' },
+        ]);
+        serviceProvider.estimatedDocumentCount.callsFake(
+          (_db: string, coll: string) => {
+            if (coll === 'broken')
+              return Promise.reject(new Error('Permission denied'));
+            return Promise.resolve(10);
+          }
+        );
+        const workingCursor = {
+          toArray: sinon.stub().resolves([{ _id: 1, name: 'test' }]),
+        };
+        serviceProvider.find.returns(workingCursor as any);
+
+        const result = (await database.crackJokes('test', true)) as Document;
+        expect(result.joke).to.be.a('string');
+        expect(result.metadata.collectionsUsed).to.include('working');
+        expect(result.metadata.collectionsUsed).to.include('broken');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content).to.include('Could not inspect');
+      });
+
+      it('caps metadata collection at 20 collections', async function () {
+        const manyCollections = Array.from({ length: 25 }, (_, i) => ({
+          name: `coll${i}`,
+          type: 'collection',
+        }));
+        serviceProvider.listCollections.resolves(manyCollections);
+
+        const result = (await database.crackJokes('test', true)) as Document;
+        expect(result.metadata.collectionsUsed).to.have.length(20);
+        expect(result.metadata.collectionsUsed).to.not.include('coll20');
+      });
+
+      it('sends only field names, not document values, in prompt', async function () {
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        const userContent = body.input[1].content;
+        // Field names should appear
+        expect(userContent).to.include('name');
+        expect(userContent).to.include('age');
+        // Actual document values should NOT appear
+        expect(userContent).to.not.include('Alice');
+        expect(userContent).to.not.include('Bob');
+      });
+
+      it('does not send Binary or sensitive field values in prompt', async function () {
+        const cursorWithSensitive = {
+          toArray: sinon.stub().resolves([
+            {
+              _id: 1,
+              password: 'secret123',
+              binData: new bson.Binary(Buffer.from('hello')),
+            },
+          ]),
+        };
+        serviceProvider.find.returns(cursorWithSensitive as any);
+
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        const userContent = body.input[1].content;
+        expect(userContent).to.not.include('secret123');
+        expect(userContent).to.not.include('aGVsbG8=');
+        // But field names are still listed
+        expect(userContent).to.include('password');
+      });
+
+      it('handles empty string description', async function () {
+        const result = await database.crackJokes('');
+        expect(result).to.be.a('string');
+        expect(fetchStub).to.have.been.calledOnce;
+      });
+
+      it('handles missing description', async function () {
+        const result = await database.crackJokes();
+        expect(result).to.be.a('string');
+        expect(fetchStub).to.have.been.calledOnce;
+      });
+
+      it('truncates description longer than 500 characters', async function () {
+        const longDesc = 'a'.repeat(600);
+        await database.crackJokes(longDesc);
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        const userContent = body.input[1].content;
+        expect(userContent).to.not.include(longDesc);
+        expect(userContent).to.include('a'.repeat(500));
+      });
+
+      it('sends stateless single-turn requests', async function () {
+        await database.crackJokes('first joke');
+        await database.crackJokes('second joke');
+
+        expect(fetchStub).to.have.been.calledTwice;
+        const body1 = JSON.parse(fetchStub.firstCall.args[1].body);
+        const body2 = JSON.parse(fetchStub.secondCall.args[1].body);
+        expect(body1).to.not.have.property('previous_response_id');
+        expect(body2).to.not.have.property('previous_response_id');
+      });
+
+      it('uses developer role for comedian persona', async function () {
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[0].role).to.equal('developer');
+        expect(body.input[0].content).to.include('standup comedian');
+        expect(body.input[1].role).to.equal('user');
+      });
+
+      it('sends api-key header in request', async function () {
+        await database.crackJokes('test');
+        const headers = fetchStub.firstCall.args[1].headers;
+        expect(headers['api-key']).to.equal('test-api-key-12345');
+      });
+
+      it('calls correct Azure OpenAI URL', async function () {
+        await database.crackJokes('test');
+        const url = fetchStub.firstCall.args[0];
+        expect(url).to.include(
+          'https://test-resource.openai.azure.com/openai/responses'
+        );
+        expect(url).to.include('api-version=');
+        expect(url).to.not.include('deployments');
+      });
+
+      it('includes model in request body', async function () {
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.model).to.equal('test-deployment');
+      });
+
+      it('handles circular references without crashing', async function () {
+        const circularDoc: any = { _id: 1, name: 'test' };
+        circularDoc.self = circularDoc;
+        const cursorWithCircular = {
+          toArray: sinon.stub().resolves([circularDoc]),
+        };
+        serviceProvider.find.returns(cursorWithCircular as any);
+
+        const result = await database.crackJokes('test');
+        expect(result).to.be.a('string');
+        // Field names extracted without crash
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content).to.include('name');
+      });
+
+      it('extracts field names from deeply nested documents without crashing', async function () {
+        let deep: any = { value: 'leaf' };
+        for (let i = 0; i < 100; i++) {
+          deep = { nested: deep };
+        }
+        const cursorWithDeep = {
+          toArray: sinon.stub().resolves([{ _id: 1, data: deep }]),
+        };
+        serviceProvider.find.returns(cursorWithDeep as any);
+
+        const result = await database.crackJokes('test');
+        expect(result).to.be.a('string');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content).to.include('data');
+      });
+
+      it('extracts field names from docs with special types', async function () {
+        const cursorWithSpecialTypes = {
+          toArray: sinon.stub().resolves([
+            {
+              _id: 1,
+              createdAt: new Date('2024-01-15T00:00:00Z'),
+              pattern: /test/i,
+            },
+          ]),
+        };
+        serviceProvider.find.returns(cursorWithSpecialTypes as any);
+
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        const userContent = body.input[1].content;
+        expect(userContent).to.include('createdAt');
+        expect(userContent).to.include('pattern');
+        // Values should NOT be in prompt — only field names
+        expect(userContent).to.not.include('2024-01-15');
+      });
+
+      it('truncates prompt when metadata is very large', async function () {
+        const hugeDocs = Array.from({ length: 5 }, (_, i) => ({
+          _id: i,
+          data: 'x'.repeat(999),
+        }));
+        const cursorWithHuge = {
+          toArray: sinon.stub().resolves(hugeDocs),
+        };
+        serviceProvider.find.returns(cursorWithHuge as any);
+
+        const manyCollections = Array.from({ length: 20 }, (_, i) => ({
+          name: `coll${i}`,
+          type: 'collection',
+        }));
+        serviceProvider.listCollections.resolves(manyCollections);
+
+        await database.crackJokes('test');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content.length).to.be.lessThan(60000);
+      });
+
+      it('sets timeout on fetch request', async function () {
+        await database.crackJokes('test');
+        const fetchOptions = fetchStub.firstCall.args[1];
+        expect(fetchOptions.signal).to.exist;
+      });
+    });
   });
 });
