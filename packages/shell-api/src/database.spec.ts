@@ -3384,6 +3384,21 @@ describe('Database', function () {
         }
       });
 
+      it('throws on non-JSON response body', async function () {
+        fetchStub.callsFake(() =>
+          Promise.resolve(
+            new Response('<html>Gateway Error</html>', { status: 200 })
+          )
+        );
+        try {
+          await database.crackJokes('test');
+          expect.fail('Expected error to be thrown');
+        } catch (e: any) {
+          expect(e).to.be.instanceOf(MongoshRuntimeError);
+          expect(e.message).to.include('invalid response format');
+        }
+      });
+
       it('throws timeout-specific error on network timeout', async function () {
         const timeoutError = new Error('network timeout');
         timeoutError.name = 'AbortError';
@@ -3440,6 +3455,31 @@ describe('Database', function () {
         const result = await database.crackJokes('tell me');
         expect(result).to.be.a('string');
         expect(fetchStub).to.have.been.calledOnce;
+      });
+
+      it('gracefully handles collection inspection errors', async function () {
+        serviceProvider.listCollections.resolves([
+          { name: 'working', type: 'collection' },
+          { name: 'broken', type: 'collection' },
+        ]);
+        serviceProvider.estimatedDocumentCount.callsFake(
+          (_db: string, coll: string) => {
+            if (coll === 'broken')
+              return Promise.reject(new Error('Permission denied'));
+            return Promise.resolve(10);
+          }
+        );
+        const workingCursor = {
+          toArray: sinon.stub().resolves([{ _id: 1, name: 'test' }]),
+        };
+        serviceProvider.find.returns(workingCursor as any);
+
+        const result = (await database.crackJokes('test', true)) as Document;
+        expect(result.joke).to.be.a('string');
+        expect(result.metadata.collectionsUsed).to.include('working');
+        expect(result.metadata.collectionsUsed).to.include('broken');
+        const body = JSON.parse(fetchStub.firstCall.args[1].body);
+        expect(body.input[1].content).to.include('Could not inspect');
       });
 
       it('caps metadata collection at 20 collections', async function () {

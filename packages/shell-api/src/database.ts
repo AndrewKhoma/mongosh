@@ -223,7 +223,14 @@ async function callLLMProvider(
     );
   }
 
-  return (await response.json()) as Document;
+  try {
+    return (await response.json()) as Document;
+  } catch {
+    throw new MongoshRuntimeError(
+      'Azure OpenAI returned an invalid response format. Check your endpoint and deployment configuration.',
+      CommonErrors.CommandFailed
+    );
+  }
 }
 
 /** Extracts the joke text from an Azure OpenAI Responses API response. */
