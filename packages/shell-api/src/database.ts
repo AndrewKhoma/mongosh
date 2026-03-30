@@ -240,8 +240,11 @@ function parseJokeFromResponse(responseData: Document): string {
     for (const item of output) {
       if (item.type === 'message' && Array.isArray(item.content)) {
         for (const content of item.content) {
-          if (content.type === 'output_text' && content.text) {
-            return content.text as string;
+          if (
+            content.type === 'output_text' &&
+            typeof content.text === 'string'
+          ) {
+            return content.text;
           }
         }
       }
