@@ -66,51 +66,7 @@ import type { MQLPipeline } from './mql-types';
 import type { Abortable } from 'events';
 import { Binary, ObjectId, Decimal128 } from 'bson';
 
-const MAX_SANITIZE_DEPTH = 10;
 const MAX_PROMPT_CHARS = 50000;
-
-function sanitizeDocForPrompt(
-  doc: Document,
-  depth = 0,
-  seen = new WeakSet<object>()
-): Document {
-  if (depth > MAX_SANITIZE_DEPTH) return '[nested too deeply]' as any;
-  if (seen.has(doc)) return '[circular reference]' as any;
-  seen.add(doc);
-
-  const result: Document = {};
-  for (const [key, value] of Object.entries(doc)) {
-    result[key] = sanitizeValue(value, depth, seen);
-    if (result[key] === undefined) delete result[key];
-  }
-  return result;
-}
-
-function sanitizeValue(
-  value: unknown,
-  depth: number,
-  seen: WeakSet<object>
-): unknown {
-  if (value === null || value === undefined) return value;
-  if (value instanceof Binary || Buffer.isBuffer(value)) return undefined;
-  if (value instanceof Date) return value.toISOString();
-  if (value instanceof RegExp) return value.toString();
-  if (value instanceof ObjectId) return value.toHexString();
-  if (value instanceof Decimal128) return value.toString();
-  if (typeof value === 'string') {
-    return value.length > 1000
-      ? value.slice(0, 1000) + '...[truncated]'
-      : value;
-  }
-  if (typeof value !== 'object') return value;
-  if (Array.isArray(value)) {
-    if (depth >= MAX_SANITIZE_DEPTH) return '[nested too deeply]';
-    return value
-      .map((v) => sanitizeValue(v, depth + 1, seen))
-      .filter((v) => v !== undefined);
-  }
-  return sanitizeDocForPrompt(value as Document, depth + 1, seen);
-}
 
 export type CollectionNamesWithTypes = {
   name: string;
@@ -2019,8 +1975,8 @@ export class Database<
     }
 
     const userMessage = desc
-      ? `The user wants a joke about: "${desc}"\n\nHere is the database metadata:\n${metadataText}`
-      : `Here is the database metadata:\n${metadataText}`;
+      ? `The user wants a joke about: "${desc}"\n\n${metadataText}`
+      : metadataText;
 
     const requestBody = {
       model: deployment,
